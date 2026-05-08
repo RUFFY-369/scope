@@ -22,7 +22,12 @@ import click
 import uvicorn
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -40,6 +45,10 @@ from scope.core.lora.manifest import (
     compute_sha256,
     load_manifest,
     save_manifest,
+)
+from scope.core.workflows import (
+    embed_workflow_assets,
+    extract_workflow_assets,
 )
 from scope.core.workflows.resolve import (
     WorkflowRequest,
@@ -2102,6 +2111,118 @@ async def resolve_workflow_endpoint(
         raise HTTPException(
             status_code=500,
             detail="Internal error while resolving workflow dependencies",
+        ) from e
+
+
+# Embedding/extracting can ship multi-MB bodies (a workflow with embedded
+# video files quickly grows past plain JSON sizes). Bump the proxy timeout
+# from the 30s default so the cloud round-trip has time to read/write files.
+_WORKFLOW_ASSET_PROXY_TIMEOUT = 120.0
+
+
+@app.post("/api/v1/workflow/embed")
+@cloud_proxy(timeout=_WORKFLOW_ASSET_PROXY_TIMEOUT)
+async def workflow_embed_endpoint(
+    http_request: Request,
+    cloud_manager: ScopeCloudBackend = Depends(get_scope_cloud),
+):
+    """Embed referenced media files into a workflow JSON.
+
+    Accepts the full workflow JSON in the request body, walks string fields
+    for media paths, and base64-encodes every existing file into a top-level
+    ``embedded_assets`` list. Returns the resulting workflow.
+
+    In cloud mode this is proxied to the cloud server because the actual
+    asset files live on its disk; reading them locally would silently embed
+    nothing.
+    """
+    try:
+        body = await http_request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400, detail="Workflow body must be a JSON object"
+        )
+    try:
+        return embed_workflow_assets(body, get_assets_dir())
+    except Exception as e:
+        logger.error("Error embedding workflow assets: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Internal error while embedding workflow assets",
+        ) from e
+
+
+@app.post("/api/v1/workflow/extract")
+async def workflow_extract_endpoint(
+    http_request: Request,
+    cloud_manager: ScopeCloudBackend = Depends(get_scope_cloud),
+):
+    """Extract embedded media from a workflow JSON.
+
+    Writes each ``embedded_assets`` entry to the local assets directory
+    (idempotent via SHA-256), rewrites path references in the workflow to
+    the resulting on-disk paths, strips ``embedded_assets``, and returns
+    the rewritten workflow.
+
+    In cloud mode the assets are also materialized locally — sessions resolve
+    paths on the cloud server, but the local frontend serves preview thumbnails
+    from the local assets directory by basename, so a local copy is required
+    for ``<img>``/``<video>`` previews to render after import.
+    """
+    try:
+        body = await http_request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400, detail="Workflow body must be a JSON object"
+        )
+
+    if cloud_manager.is_connected:
+        # Materialize a local copy of every embedded asset so the frontend
+        # can render previews (its thumbnail endpoint reads from the local
+        # assets dir by basename). The rewritten workflow we get back here
+        # is discarded; we use cloud's response so workflow paths resolve
+        # at session-run time on the cloud server.
+        local_materialization_warning: str | None = None
+        try:
+            extract_workflow_assets(body, get_assets_dir())
+        except Exception as e:
+            logger.warning(
+                "extract: local asset materialization failed (cloud copy "
+                "still attempted): %s",
+                e,
+            )
+            local_materialization_warning = (
+                "Local asset materialization failed; embedded media previews "
+                "may not render until the assets are uploaded again."
+            )
+        cloud_response = await proxy_with_body(
+            cloud_manager,
+            method="POST",
+            path="/api/v1/workflow/extract",
+            body=body,
+            timeout=_WORKFLOW_ASSET_PROXY_TIMEOUT,
+        )
+        # Surface the warning to the client via a response header so the
+        # frontend can toast a user-visible notice. The body is the cloud's
+        # rewritten workflow (paths point at cloud's filesystem).
+        headers = (
+            {"X-Scope-Warning": local_materialization_warning}
+            if local_materialization_warning
+            else None
+        )
+        return JSONResponse(content=cloud_response, headers=headers)
+
+    try:
+        return extract_workflow_assets(body, get_assets_dir())
+    except Exception as e:
+        logger.error("Error extracting workflow assets: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Internal error while extracting workflow assets",
         ) from e
 
 

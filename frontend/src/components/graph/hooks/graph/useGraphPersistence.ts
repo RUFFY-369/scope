@@ -8,12 +8,18 @@ import {
 } from "../../../../lib/graphUtils";
 import type { FlowNodeData } from "../../../../lib/graphUtils";
 import type { PluginInfo, NodeDefinitionDto } from "../../../../lib/api";
-import { resolveWorkflow, fetchNodeDefinitions } from "../../../../lib/api";
+import {
+  resolveWorkflow,
+  fetchNodeDefinitions,
+  embedWorkflowAssets,
+  extractWorkflowAssets,
+} from "../../../../lib/api";
 import type {
   ScopeWorkflow,
   WorkflowResolutionPlan,
 } from "../../../../lib/workflowApi";
 import { buildGraphWorkflow } from "../../../../lib/workflowSettings";
+import { toast } from "sonner";
 import { usePipelinesContext } from "../../../../contexts/PipelinesContext";
 import { usePluginsContext } from "../../../../contexts/PluginsContext";
 import { useLoRAsContext } from "../../../../contexts/LoRAsContext";
@@ -505,7 +511,27 @@ export function useGraphPersistence({
             parsed.format === "scope-workflow" &&
             Array.isArray(parsed.pipelines)
           ) {
-            const workflow = parsed as ScopeWorkflow;
+            let workflow = parsed as ScopeWorkflow;
+            if (
+              Array.isArray(
+                (workflow as unknown as { embedded_assets?: unknown[] })
+                  .embedded_assets
+              )
+            ) {
+              try {
+                const result = await extractWorkflowAssets(workflow);
+                workflow = result.workflow;
+                if (result.warning) {
+                  toast.warning("Embedded media partially restored", {
+                    description: result.warning,
+                  });
+                }
+              } catch (err) {
+                console.error("Failed to extract embedded assets:", err);
+                setStatus("Import failed: could not restore embedded media");
+                return;
+              }
+            }
             setPendingImportWorkflow(workflow);
             setPendingImportResolving(true);
             try {
@@ -612,8 +638,17 @@ export function useGraphPersistence({
     ]
   );
 
-  const handleExport = useCallback(() => {
-    const workflow = buildCurrentWorkflow();
+  const handleExport = useCallback(async () => {
+    const baseWorkflow = buildCurrentWorkflow();
+
+    let workflow = baseWorkflow;
+    let embedFailed = false;
+    try {
+      workflow = await embedWorkflowAssets(baseWorkflow);
+    } catch (err) {
+      embedFailed = true;
+      console.warn("Workflow embed failed; exporting without embeds:", err);
+    }
 
     const dataStr = JSON.stringify(workflow, null, 2);
     const blob = new Blob([dataStr], { type: "application/json" });
@@ -628,7 +663,15 @@ export function useGraphPersistence({
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
-    setStatus("Graph exported");
+    if (embedFailed) {
+      setStatus("Graph exported without embedded media");
+      toast.warning("Graph exported without embedded media", {
+        description:
+          "Referenced images, audio, and video could not be bundled. Sharing this file may show missing assets on another machine.",
+      });
+    } else {
+      setStatus("Graph exported");
+    }
   }, [buildCurrentWorkflow]);
 
   const getCurrentGraphConfig = useCallback(() => {

@@ -12,6 +12,7 @@ import {
 } from "../ui/dialog";
 import { toast } from "sonner";
 import type { ScopeWorkflow } from "../../lib/workflowApi";
+import { embedWorkflowAssets } from "../../lib/api";
 
 interface GraphWorkflowExportDialogProps {
   open: boolean;
@@ -27,10 +28,19 @@ export function GraphWorkflowExportDialog({
   const [name, setName] = useState("Untitled Workflow");
   const [exporting, setExporting] = useState(false);
 
-  const handleExport = () => {
+  const handleExport = async () => {
     setExporting(true);
     try {
-      const workflow = buildWorkflow(name);
+      const baseWorkflow = buildWorkflow(name);
+
+      let workflow = baseWorkflow;
+      let embedFailed = false;
+      try {
+        workflow = await embedWorkflowAssets(baseWorkflow);
+      } catch (err) {
+        embedFailed = true;
+        console.warn("Workflow embed failed; exporting without embeds:", err);
+      }
 
       const blob = new Blob([JSON.stringify(workflow, null, 2)], {
         type: "application/json",
@@ -45,9 +55,16 @@ export function GraphWorkflowExportDialog({
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
 
-      toast.success("Workflow exported", {
-        description: `"${name}" saved as .scope-workflow.json`,
-      });
+      if (embedFailed) {
+        toast.warning("Workflow exported without embedded media", {
+          description:
+            "Referenced images, audio, and video could not be bundled. Sharing this file may show missing assets on another machine.",
+        });
+      } else {
+        toast.success("Workflow exported", {
+          description: `"${name}" saved as .scope-workflow.json`,
+        });
+      }
       onClose();
     } catch (err) {
       console.error("Workflow export failed:", err);
