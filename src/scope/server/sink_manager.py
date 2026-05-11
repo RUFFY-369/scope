@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 
+from scope.core.outputs import HARDWARE_SINK_MODES
+
 from .media_packets import MediaTimestamp, VideoPacket, ensure_video_packet
 from .recording_coordinator import RecordingCoordinator
 
@@ -340,12 +342,18 @@ class SinkManager:
         for node in graph.nodes:
             if node.type != "sink":
                 continue
-            if node.sink_mode not in ("spout", "ndi", "syphon"):
+            if node.sink_mode not in HARDWARE_SINK_MODES:
                 continue
             sink_name = node.sink_name or ""
             node_id = node.id
 
-            if node_id not in self._sink_queues_by_node:
+            if (
+                node_id not in self._sink_queues_by_node
+                and node_id not in self._sink_hardware_queues_by_node
+            ):
+                continue
+
+            if node_id in self._sinks_by_node:
                 continue
 
             sink_class = sink_classes.get(node.sink_mode)
@@ -440,7 +448,22 @@ class SinkManager:
     def put_to_record(self, node_id: str, frame) -> None:
         """Convert a VideoFrame to tensor and put it into a record node's queue."""
         rec_q = self._recording._record_queues.get(node_id)
-        if rec_q is None:
+        self._enqueue_video_frame(rec_q, frame, node_id=node_id, kind="record")
+
+    @staticmethod
+    def _enqueue_video_frame(
+        target_queue: "queue.Queue | None",
+        frame,
+        *,
+        node_id: str,
+        kind: str,
+    ) -> None:
+        """Convert *frame* (VideoFrame) to a VideoPacket and enqueue it.
+
+        Drops the oldest packet if the queue is full. Used by both record
+        and hardware-sink fan-out paths.
+        """
+        if target_queue is None:
             return
         try:
             frame_np = frame.to_ndarray(format="rgb24")
@@ -456,15 +479,15 @@ class SinkManager:
                 )
             packet = VideoPacket(tensor=t, timestamp=timestamp)
             try:
-                rec_q.put_nowait(packet)
+                target_queue.put_nowait(packet)
             except queue.Full:
                 try:
-                    rec_q.get_nowait()
-                    rec_q.put_nowait(packet)
+                    target_queue.get_nowait()
+                    target_queue.put_nowait(packet)
                 except queue.Empty:
                     pass
         except Exception as e:
-            logger.error(f"Error in put_to_record for node {node_id}: {e}")
+            logger.error(f"Error enqueueing {kind} frame for node {node_id}: {e}")
 
     @property
     def recording(self) -> RecordingCoordinator:
@@ -486,6 +509,46 @@ class SinkManager:
         record_node_ids = graph.get_record_node_ids()
         if record_node_ids:
             self._recording.setup_queues(record_node_ids)
+
+    def setup_cloud_hardware_sinks(
+        self, graph: Any, dimensions: tuple[int, int]
+    ) -> None:
+        """Set up local hardware output sinks (Syphon/NDI/Spout) in cloud mode.
+
+        Hardware sinks always run on the local machine (Syphon is macOS-only,
+        NDI/Spout require local network/hardware access) even when pipeline
+        execution is offloaded to the cloud. This method allocates the
+        per-node hardware queues and sender threads that ``put_to_sink``
+        feeds from frames received from the cloud relay.
+
+        In local mode the queues are wired by ``graph_executor`` via
+        ``setup_graph_queues``; this is the cloud-mode equivalent.
+        """
+        from .graph_schema import GraphConfig
+
+        if not isinstance(graph, GraphConfig):
+            return
+
+        for node in graph.nodes:
+            if node.type != "sink":
+                continue
+            if node.sink_mode not in HARDWARE_SINK_MODES:
+                continue
+            if node.id in self._sink_hardware_queues_by_node:
+                continue
+            self._sink_hardware_queues_by_node[node.id] = queue.Queue(maxsize=30)
+
+        self.setup_multi_sinks(graph, dimensions)
+
+    def put_to_sink(self, node_id: str, frame) -> None:
+        """Push a VideoFrame into a hardware sink's queue (cloud relay path).
+
+        Used by the cloud-relay wiring to tee cloud-produced frames into a
+        local Syphon/NDI/Spout sender, mirroring how ``put_to_record``
+        tees frames into record-node queues.
+        """
+        sink_q = self._sink_hardware_queues_by_node.get(node_id)
+        self._enqueue_video_frame(sink_q, frame, node_id=node_id, kind="hardware sink")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -514,6 +577,7 @@ class SinkManager:
             except Exception as e:
                 logger.error(f"Error closing output sink for node {node_id}: {e}")
         self._sinks_by_node.clear()
+        self._sink_hardware_queues_by_node.clear()
 
         # Recording
         self._recording.cleanup()

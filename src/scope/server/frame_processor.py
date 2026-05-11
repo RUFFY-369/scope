@@ -225,6 +225,12 @@ class FrameProcessor:
                 graph = GraphConfig(**graph_data)
                 self._source_manager.setup_multi_sources(graph)
                 self.sink_manager.setup_cloud_graph(graph)
+                # Hardware sinks (Syphon/NDI/Spout) always run on the local
+                # machine even when the pipeline executes on cloud. The cloud
+                # relay tees its received frames into these local senders.
+                # The dimensions are a placeholder — SyphonSender (and other
+                # hardware senders) auto-resize when the first frame arrives.
+                self.sink_manager.setup_cloud_hardware_sinks(graph, (512, 512))
 
             logger.info("[FRAME-PROCESSOR] Started in cloud mode")
 
