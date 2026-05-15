@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .media_packets import VideoPacket, ensure_video_packet
+from .pinned_transfer import gpu_to_cpu
 
 if TYPE_CHECKING:
     from .recording import RecordingManager
@@ -102,7 +103,7 @@ class RecordingCoordinator:
             frame = packet.tensor
             frame = frame.squeeze(0)
             if frame.is_cuda:
-                frame = frame.cpu()
+                frame = gpu_to_cpu(frame)
             return VideoPacket(tensor=frame, timestamp=packet.timestamp)
         except queue.Empty:
             return None

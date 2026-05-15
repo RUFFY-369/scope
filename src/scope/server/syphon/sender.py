@@ -152,7 +152,9 @@ class SyphonSender:
             alpha = torch.full((h, w, 1), 255, dtype=torch.uint8, device=frame.device)
             frame = torch.cat([frame, alpha], dim=-1)
 
-        return frame.contiguous().cpu().numpy()
+        from scope.server.pinned_transfer import gpu_to_cpu
+
+        return gpu_to_cpu(frame.contiguous()).numpy()
 
     def _prepare_numpy(self, frame: np.ndarray) -> np.ndarray | None:
         if frame.ndim != 3:

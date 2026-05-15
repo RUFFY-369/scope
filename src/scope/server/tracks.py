@@ -15,6 +15,7 @@ from av import VideoFrame
 from scope.core.pacing import MediaPacingState, compute_pacing_decision
 
 from .media_packets import VideoPacket, ensure_video_packet
+from .pinned_transfer import gpu_to_cpu
 from .pipeline_manager import PipelineManager
 from .recording import ensure_even_video_frame
 
@@ -134,7 +135,7 @@ class QueueVideoTrack(MediaStreamTrack):
 
             frame_squeezed = packet.tensor.squeeze(0)
             if frame_squeezed.is_cuda:
-                frame_squeezed = frame_squeezed.cpu()
+                frame_squeezed = gpu_to_cpu(frame_squeezed)
 
             video_frame = ensure_even_video_frame(
                 VideoFrame.from_ndarray(frame_squeezed.numpy(), format="rgb24")

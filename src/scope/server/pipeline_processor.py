@@ -21,6 +21,7 @@ from .media_packets import (
     VideoPacket,
     ensure_video_packet,
 )
+from .pinned_transfer import gpu_to_cpu
 from .pipeline_manager import PipelineNotAvailableException
 from .tempo_sync import get_beat_boundary
 
@@ -715,7 +716,7 @@ class PipelineProcessor:
             audio_sample_rate = output_dict.get("audio_sample_rate")
             if audio_output is not None and audio_sample_rate is not None:
                 try:
-                    audio_cpu = audio_output.detach().cpu()
+                    audio_cpu = gpu_to_cpu(audio_output.detach())
                     audio_ts = output_dict.get("audio_timestamps")
                     timestamp = MediaTimestamp()
                     if isinstance(audio_ts, list) and audio_ts:
@@ -799,7 +800,7 @@ class PipelineProcessor:
                         .contiguous()
                         .detach()
                     )
-                frames = [value[i].unsqueeze(0) for i in range(value.shape[0])]
+                frames = torch.split(value, 1, dim=0)
                 ts_key = f"{port}_timestamps"
                 raw_timestamps = output_dict.get(ts_key)
                 if port == "video" and raw_timestamps is None:
@@ -807,9 +808,9 @@ class PipelineProcessor:
                 timestamps = self._normalize_timestamps(raw_timestamps, len(frames))
                 for idx, frame in enumerate(frames):
                     packet = VideoPacket(tensor=frame, timestamp=timestamps[idx])
-                    for q in queues:
+                    for qi, q in enumerate(queues):
                         try:
-                            if q is queues[0]:
+                            if qi == 0:
                                 q.put_nowait(packet)
                             else:
                                 q.put_nowait(

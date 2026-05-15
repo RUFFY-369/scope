@@ -19,6 +19,7 @@ import torch
 from scope.core.outputs import HARDWARE_SINK_MODES
 
 from .media_packets import MediaTimestamp, VideoPacket, ensure_video_packet
+from .pinned_transfer import gpu_to_cpu
 from .recording_coordinator import RecordingCoordinator
 
 if TYPE_CHECKING:
@@ -98,7 +99,7 @@ class SinkManager:
             packet = ensure_video_packet(sink_q.get_nowait())
             frame = packet.tensor.squeeze(0)
             if frame.is_cuda:
-                frame = frame.cpu()
+                frame = gpu_to_cpu(frame)
             return VideoPacket(tensor=frame, timestamp=packet.timestamp)
         except queue.Empty:
             return None
@@ -420,7 +421,7 @@ class SinkManager:
                 # Convert tensor to numpy for the output sink
                 frame_squeezed = packet.tensor.squeeze(0)
                 if frame_squeezed.is_cuda:
-                    frame_squeezed = frame_squeezed.cpu()
+                    frame_squeezed = gpu_to_cpu(frame_squeezed)
                 frame_np = frame_squeezed.numpy()
 
                 sink.send_frame(frame_np)

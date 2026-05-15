@@ -21,6 +21,7 @@ from .media_packets import (
 )
 from .modulation import ModulationEngine
 from .parameter_scheduler import ParameterScheduler
+from .pinned_transfer import gpu_to_cpu
 from .pipeline_manager import PipelineManager
 from .pipeline_processor import PipelineProcessor
 from .sink_manager import SinkManager
@@ -622,7 +623,7 @@ class FrameProcessor:
                 )
                 frame = packet.tensor.squeeze(0)
                 if frame.is_cuda:
-                    frame = frame.cpu()
+                    frame = gpu_to_cpu(frame)
                 packet = VideoPacket(tensor=frame, timestamp=packet.timestamp)
             except queue.Empty:
                 return None

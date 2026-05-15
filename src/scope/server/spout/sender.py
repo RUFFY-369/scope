@@ -202,9 +202,11 @@ class SpoutSender:
         # Ensure contiguous before transfer
         frame = frame.contiguous()
 
-        # Transfer to CPU and convert to numpy
+        # Transfer to CPU using async pinned memory and convert to numpy
         # This is now much smaller (uint8 vs float32) and already formatted
-        return frame.cpu().numpy()
+        from scope.server.pinned_transfer import gpu_to_cpu
+
+        return gpu_to_cpu(frame).numpy()
 
     def _prepare_numpy_array(self, frame: np.ndarray) -> np.ndarray | None:
         """
