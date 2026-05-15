@@ -4,6 +4,14 @@ Provides a thread-local pinned buffer pool so each consumer thread
 (WebRTC, NDI, Spout, Syphon, recording) can perform asynchronous
 GPU→CPU transfers without allocating pinned memory on every frame.
 
+This module offers two APIs:
+
+1. ``gpu_to_cpu(tensor)`` — Simple, thread-local single-buffer per shape.
+   Best for most call sites where only one transfer is in-flight at a time.
+
+2. ``gpu_to_cpu_pooled(tensor, pool)`` — Pool-based double-buffering for
+   high-throughput paths where multiple transfers may overlap.
+
 Usage::
 
     from .pinned_transfer import gpu_to_cpu
@@ -66,6 +74,35 @@ def gpu_to_cpu(tensor: torch.Tensor) -> torch.Tensor:
     torch.cuda.current_stream().synchronize()
 
     return buf
+
+
+def gpu_to_cpu_pooled(
+    tensor: torch.Tensor,
+    pool: "PinnedBufferPool",  # noqa: F821 — forward reference
+) -> tuple[torch.Tensor, "PinnedBufferPool"]:
+    """Transfer a CUDA tensor to CPU using a shared buffer pool.
+
+    Unlike ``gpu_to_cpu``, this returns a (cpu_tensor, pool) tuple.
+    The caller MUST call ``pool.release(cpu_tensor)`` after consuming
+    the data (e.g. after ``.numpy()`` and encoding).
+
+    Args:
+        tensor: A CUDA tensor.
+        pool: A PinnedBufferPool instance.
+
+    Returns:
+        (cpu_tensor, pool) — the pool reference for release convenience.
+    """
+    if not tensor.is_cuda:
+        return tensor.contiguous(), pool
+
+    from .buffer_pool import PinnedBufferPool  # noqa: F811
+
+    buf = pool.acquire(tensor.shape, tensor.dtype)
+    buf.copy_(tensor, non_blocking=True)
+    torch.cuda.current_stream().synchronize()
+
+    return buf, pool
 """
 Performance notes:
 - torch.empty(..., pin_memory=True) is a one-time cost (~0.1ms per shape).
@@ -73,6 +110,6 @@ Performance notes:
 - The synchronize() is required before .numpy(), but it's ~10-50x faster
   than a blocking .cpu() call because the DMA transfer has already
   completed (or nearly so) by the time we call it.
-- For truly zero-sync operation, a double-buffering scheme can be layered
-  on top (Phase 2).
+- gpu_to_cpu_pooled enables true double-buffering when paired with
+  PinnedBufferPool(pool_size=2).
 """

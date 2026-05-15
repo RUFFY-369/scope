@@ -311,6 +311,14 @@ class PipelineManager:
                 node_id=key,
             )
 
+            # Phase 3: Attempt torch.compile optimization on eligible pipelines.
+            # This wraps pipeline.__call__ with a compiled version that uses
+            # CUDA Graphs (reduce-overhead mode) or Inductor optimizations.
+            # Falls back to eager mode silently on failure.
+            from .compile_optimizer import try_compile_pipeline
+
+            try_compile_pipeline(pipeline)
+
             # Hold lock while updating state
             self.set_loading_stage(None)
             with self._lock:
@@ -484,6 +492,20 @@ class PipelineManager:
             produces_audio = NodeRegistry.chain_produces_audio(registry_ids)
 
             # Return the captured state (with error status if it was an error)
+            # Include GPU hardware profile for frontend precision recommendations
+            from .hardware_optimizer import get_gpu_profile
+
+            gpu_profile = get_gpu_profile()
+            gpu_info = None
+            if gpu_profile is not None:
+                gpu_info = {
+                    "arch": gpu_profile.arch,
+                    "name": gpu_profile.name,
+                    "vram_gb": gpu_profile.vram_gb,
+                    "supports_fp8": gpu_profile.supports_fp8,
+                    "supports_bf16": gpu_profile.supports_bf16,
+                }
+
             return {
                 "status": current_status.value,
                 "pipeline_id": pipeline_id,
@@ -493,6 +515,7 @@ class PipelineManager:
                 "loading_stage": self._loading_stage,
                 "produces_video": produces_video,
                 "produces_audio": produces_audio,
+                "gpu_info": gpu_info,
             }
 
     async def get_pipeline_async(self):
@@ -880,6 +903,40 @@ class PipelineManager:
             user_id=user_id,
         )
 
+    @staticmethod
+    def _resolve_quantization(load_params: dict | None) -> str | None:
+        """Resolve quantization setting, auto-detecting from hardware if not set.
+
+        If the user explicitly set ``quantization`` in load_params, that value
+        is used. Otherwise, the GPU hardware profile is consulted for an
+        automatic recommendation (e.g. FP8 on RTX 4090).
+
+        Args:
+            load_params: Pipeline load parameters dict.
+
+        Returns:
+            Quantization method string or None.
+        """
+        explicit = None
+        if load_params:
+            explicit = load_params.get("quantization", None)
+
+        if explicit is not None:
+            return explicit
+
+        # Auto-detect from hardware
+        from .hardware_optimizer import get_gpu_profile, recommend_quantization
+
+        profile = get_gpu_profile()
+        recommended = recommend_quantization(profile)
+        if recommended:
+            logger.info(
+                "Auto-detected quantization=%s for GPU: %s",
+                recommended,
+                profile.name if profile else "unknown",
+            )
+        return recommended
+
     def _load_pipeline_implementation(
         self,
         pipeline_id: str,
@@ -986,9 +1043,7 @@ class PipelineManager:
                 default_seed=42,
             )
 
-            quantization = None
-            if load_params:
-                quantization = load_params.get("quantization", None)
+            quantization = self._resolve_quantization(load_params)
 
             pipeline = StreamDiffusionV2Pipeline(
                 config,
@@ -1077,9 +1132,7 @@ class PipelineManager:
                 default_seed=42,
             )
 
-            quantization = None
-            if load_params:
-                quantization = load_params.get("quantization", None)
+            quantization = self._resolve_quantization(load_params)
 
             pipeline = LongLivePipeline(
                 config,
@@ -1151,9 +1204,7 @@ class PipelineManager:
                 default_seed=42,
             )
 
-            quantization = None
-            if load_params:
-                quantization = load_params.get("quantization", None)
+            quantization = self._resolve_quantization(load_params)
 
             pipeline = KreaRealtimeVideoPipeline(
                 config,
@@ -1215,9 +1266,7 @@ class PipelineManager:
                 default_seed=42,
             )
 
-            quantization = None
-            if load_params:
-                quantization = load_params.get("quantization", None)
+            quantization = self._resolve_quantization(load_params)
 
             pipeline = RewardForcingPipeline(
                 config,
@@ -1271,9 +1320,7 @@ class PipelineManager:
                 default_seed=42,
             )
 
-            quantization = None
-            if load_params:
-                quantization = load_params.get("quantization", None)
+            quantization = self._resolve_quantization(load_params)
 
             pipeline = MemFlowPipeline(
                 config,
