@@ -10,6 +10,7 @@ weights in a single lookup.
 
 from scope.core.nodes.registry import NodeRegistry
 from scope.core.pipelines.artifacts import Artifact
+import scope.core.pipelines.registry  # Trigger auto-registration
 
 
 def get_artifacts_for_pipeline(node_type_id: str) -> list[Artifact]:
